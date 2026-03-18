@@ -98,11 +98,19 @@ export default class OpenAiApi {
 		}
 
 		try {
-			const completion = await openai.chat.completions.create({
+			const requestParams: Parameters<typeof openai.chat.completions.create>[0] = {
 				messages: messages,
 				model: model ?? this.plugin.settings.defaultModel,
 				max_completion_tokens: maxTokens ?? this.plugin.settings.defaultMaxNumTokens,
-			});
+			};
+
+			if (this.plugin.settings.enableWebSearch) {
+				// web_search_options enables real-time web results via search-capable models
+				// (gpt-4o-search-preview, gpt-4o-mini-search-preview, gpt-5-search-api)
+				(requestParams as Record<string, unknown>)["web_search_options"] = {};
+			}
+
+			const completion = await openai.chat.completions.create(requestParams);
 
 			if (this.plugin.settings.debugToConsole) {
 				const logMessage = {

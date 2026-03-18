@@ -110,6 +110,20 @@ export class OWlSettingTab extends PluginSettingTab {
 				textEl.inputEl.rows = 6;
 			});
 
+		new Setting(containerEl)
+			.setName("Enable web search")
+			.setDesc(
+				"Adds web_search_options to every chat completion request, giving the model access to real-time web results. " +
+				"Requires a search-capable model: gpt-4o-search-preview, gpt-4o-mini-search-preview, or gpt-5-search-api.",
+			)
+			.addToggle((cb: ToggleComponent) => {
+				cb.setValue(this.plugin.settings.enableWebSearch ?? true);
+				cb.onChange(async (value: boolean) => {
+					this.plugin.settings.enableWebSearch = value;
+					await this.plugin.saveSettings();
+				});
+			});
+
 		promotionalLinks(containerEl);
 		containerEl.createEl("hr");
 
