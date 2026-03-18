@@ -8,11 +8,12 @@ export interface Settings {
 	displayTokenUsageDesktop?: boolean;
 	displayTokenUsageMobile?: boolean;
 	defaultSystemMessage: string;
+	enableWebSearch?: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
 	defaultEndpoint: "",
-	defaultModel: "gpt-4-turbo",
+	defaultModel: "gpt-4o-search-preview",
 	defaultApiKey: "",
 	defaultMaxOutgoingCharacters: 4096,
 	defaultMaxNumTokens: 1024,
@@ -20,4 +21,5 @@ export const DEFAULT_SETTINGS: Settings = {
 	displayTokenUsageDesktop: true,
 	displayTokenUsageMobile: false,
 	defaultSystemMessage: "You are a helpful assistant.",
+	enableWebSearch: true,
 };
