@@ -1,17 +1,28 @@
-// This module takes care of all communication with the OpenAI Client Library
+// This module takes care of all communication with the OpenAI-compatible API
+// using Obsidian's requestUrl to bypass CORS restrictions in the browser context.
 // https://platform.openai.com/docs/api-reference
 
-import { Notice, Platform } from "obsidian";
-import { OpenAI } from "openai";
-import type { ClientOptions } from "openai";
+import { Notice, Platform, requestUrl } from "obsidian";
 import type { ChatCompletionMessageParam } from "openai/resources";
 import type AitPlugin from "../main";
+
+const OPENAI_BASE = "https://api.openai.com/v1";
 
 export default class OpenAiApi {
 	private plugin: AitPlugin;
 
 	constructor(plugin: AitPlugin) {
 		this.plugin = plugin;
+	}
+
+	// returns the base URL to use, stripping any trailing slash
+	private baseUrl(overrideBaseURL?: string | null): string {
+		const raw =
+			overrideBaseURL ??
+			(this.plugin.settings.defaultEndpoint !== ""
+				? this.plugin.settings.defaultEndpoint
+				: OPENAI_BASE);
+		return raw.replace(/\/+$/, "");
 	}
 
 	// validates the current settings (API Key and Model)
@@ -27,7 +38,7 @@ export default class OpenAiApi {
 		return true;
 	};
 
-	// executes a single prompt and returns the completion
+	// executes a single prompt and returns the completion via the Responses API
 	chat = async (
 		promptOrMessages: string | ChatCompletionMessageParam[],
 		model?: string | null,
@@ -38,14 +49,6 @@ export default class OpenAiApi {
 		apiKey?: string | null,
 		organization?: string | null,
 	): Promise<string> => {
-		const openai = new OpenAI({
-			apiKey: apiKey ?? this.plugin.settings.defaultApiKey,
-			dangerouslyAllowBrowser: true,
-		} as ClientOptions);
-
-		if (baseURL) openai.baseURL = baseURL;
-		if (organization) openai.organization = organization;
-
 		if (!this.validateSettings()) {
 			new Notice(
 				"Check your setting for valid API key, model and endpoint.",
@@ -54,17 +57,14 @@ export default class OpenAiApi {
 			return "";
 		}
 
-		if (this.plugin.settings.defaultEndpoint !== "")
-			openai.baseURL = this.plugin.settings.defaultEndpoint;
-
 		// Normalise to a messages array
 		const messages: ChatCompletionMessageParam[] =
 			typeof promptOrMessages === "string"
 				? [{ role: "user", content: promptOrMessages }]
-				: promptOrMessages;
+				: [...promptOrMessages];
 
-		// Extract system message from the array (Responses API requires it in
-		// the separate `instructions` field, not inside `input`).
+		// Extract system message from the array — Responses API requires it in
+		// the separate `instructions` field, not inside `input`.
 		// Priority: systemMessage argument > system entry in array > settings default
 		let instructions: string = this.plugin.settings.defaultSystemMessage;
 		const systemIndex = messages.findIndex((m) => m.role === "system");
@@ -76,7 +76,7 @@ export default class OpenAiApi {
 		if (systemMessage) instructions = systemMessage;
 
 		// Only user/assistant messages go into `input`
-		const input = messages as unknown as Record<string, unknown>[];
+		const input = messages;
 
 		// Test the character count to make sure it does not exceed maxOutgoingCharacters
 		const jsonString = JSON.stringify(input);
@@ -97,8 +97,12 @@ export default class OpenAiApi {
 		}
 
 		try {
-			const requestParams: Record<string, unknown> = {
-				model: model ?? this.plugin.settings.defaultModel,
+			const resolvedApiKey = apiKey ?? this.plugin.settings.defaultApiKey;
+			const resolvedModel = model ?? this.plugin.settings.defaultModel;
+			const url = `${this.baseUrl(baseURL)}/responses`;
+
+			const body: Record<string, unknown> = {
+				model: resolvedModel,
 				instructions: instructions,
 				input: input,
 				max_output_tokens: maxTokens ?? this.plugin.settings.defaultMaxNumTokens,
@@ -106,21 +110,40 @@ export default class OpenAiApi {
 
 			if (this.plugin.settings.enableWebSearch) {
 				// web_search tool works with any capable model on both OpenAI and x.ai
-				requestParams["tools"] = [{ type: "web_search" }];
+				body["tools"] = [{ type: "web_search" }];
 			}
 
-			const response = await (openai.responses.create as (params: Record<string, unknown>) => Promise<Record<string, unknown>>)(requestParams);
+			const headers: Record<string, string> = {
+				"Content-Type": "application/json",
+				"Authorization": `Bearer ${resolvedApiKey}`,
+			};
+			if (organization) headers["OpenAI-Organization"] = organization;
+
+			const res = await requestUrl({
+				url,
+				method: "POST",
+				headers,
+				body: JSON.stringify(body),
+				throw: false,
+			});
+
+			if (res.status >= 400) {
+				const errText = res.text ?? String(res.status);
+				throw new Error(`HTTP ${res.status.toString()}: ${errText}`);
+			}
+
+			// eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+			const data = res.json;
 
 			if (this.plugin.settings.debugToConsole) {
-				const logMessage = {
-					instructions: instructions,
-					input: input,
-					response: response,
-					clientOptions: openai,
+				this.plugin.log("chat", {
+					url,
+					instructions,
+					input,
+					response: data,
 					outgoingCharacterCountMax: maxCharacters,
 					outgoingCharacerCountActual: characterCount,
-				};
-				this.plugin.log("chat", logMessage);
+				});
 			}
 
 			if (
@@ -130,7 +153,8 @@ export default class OpenAiApi {
 				((Platform.isMobile && this.plugin.settings.displayTokenUsageMobile) ??
 					false)
 			) {
-				const usage = response["usage"] as Record<string, number> | undefined;
+				// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+				const usage = data?.usage as Record<string, number> | undefined;
 				if (usage) {
 					const displayMessage =
 						`${this.plugin.APP_ABBREVIARTION}:\n` +
@@ -140,7 +164,8 @@ export default class OpenAiApi {
 				}
 			}
 
-			const outputText = response["output_text"];
+			// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+			const outputText = data?.output_text;
 			return typeof outputText === "string" ? outputText : "";
 		} catch (error) {
 			new Notice(
@@ -153,11 +178,6 @@ export default class OpenAiApi {
 
 	// for the current endpoint, returns a list of available models
 	availableModels = async (): Promise<string[]> => {
-		const openai = new OpenAI({
-			apiKey: this.plugin.settings.defaultApiKey,
-			dangerouslyAllowBrowser: true,
-		} as ClientOptions);
-
 		if (!this.validateSettings()) {
 			new Notice(
 				`${this.plugin.APP_ABBREVIARTION} Check your setting for valid API key, model and endpoint.`,
@@ -166,12 +186,38 @@ export default class OpenAiApi {
 			return [];
 		}
 
-		const models = await openai.models.list();
+		try {
+			const url = `${this.baseUrl()}/models`;
+			const res = await requestUrl({
+				url,
+				method: "GET",
+				headers: {
+					"Authorization": `Bearer ${this.plugin.settings.defaultApiKey}`,
+				},
+				throw: false,
+			});
 
-		if (this.plugin.settings.debugToConsole) {
-			this.plugin.log("availableModels", models);
+			if (res.status >= 400) {
+				throw new Error(`HTTP ${res.status.toString()}: ${res.text}`);
+			}
+
+			// eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+			const data = res.json;
+
+			if (this.plugin.settings.debugToConsole) {
+				this.plugin.log("availableModels", data);
+			}
+
+			// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-return
+			return (data?.data ?? []).map((m: { id: string }) => m.id);
+		} catch (error) {
+			new Notice(
+				`${this.plugin.APP_ABBREVIARTION} Error: ${String(error)}`,
+				20000,
+			);
+			return [];
 		}
-
-		return models.data.map((model) => model.id);
 	};
 }
+
+
