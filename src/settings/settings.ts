@@ -13,7 +13,7 @@ export interface Settings {
 
 export const DEFAULT_SETTINGS: Settings = {
 	defaultEndpoint: "",
-	defaultModel: "gpt-4o-search-preview",
+	defaultModel: "gpt-4o",
 	defaultApiKey: "",
 	defaultMaxOutgoingCharacters: 4096,
 	defaultMaxNumTokens: 1024,

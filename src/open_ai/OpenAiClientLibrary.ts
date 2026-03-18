@@ -57,30 +57,29 @@ export default class OpenAiApi {
 		if (this.plugin.settings.defaultEndpoint !== "")
 			openai.baseURL = this.plugin.settings.defaultEndpoint;
 
+		// Normalise to a messages array
 		const messages: ChatCompletionMessageParam[] =
 			typeof promptOrMessages === "string"
 				? [{ role: "user", content: promptOrMessages }]
 				: promptOrMessages;
 
-		// check if messages contains a role of 'system' and if not, add it
-		if (!messages.find((message) => message.role === "system")) {
-			messages.unshift({
-				role: "system",
-				content: this.plugin.settings.defaultSystemMessage,
-			});
+		// Extract system message from the array (Responses API requires it in
+		// the separate `instructions` field, not inside `input`).
+		// Priority: systemMessage argument > system entry in array > settings default
+		let instructions: string = this.plugin.settings.defaultSystemMessage;
+		const systemIndex = messages.findIndex((m) => m.role === "system");
+		if (systemIndex > -1) {
+			const sysMsg = messages[systemIndex];
+			if (typeof sysMsg.content === "string") instructions = sysMsg.content;
+			messages.splice(systemIndex, 1);
 		}
-		// find the system message from the messages and replace it with the systemMessage parameter if defined
-		if (systemMessage) {
-			const systemMessageIndex = messages.findIndex(
-				(message) => message.role === "system",
-			);
-			if (systemMessageIndex > -1) {
-				messages[systemMessageIndex].content = systemMessage;
-			}
-		}
+		if (systemMessage) instructions = systemMessage;
 
-		// Test the character count of messages to make sure it does not exceed the user defined maxOutgoingCharacters
-		const jsonString = JSON.stringify(messages);
+		// Only user/assistant messages go into `input`
+		const input = messages as unknown as Record<string, unknown>[];
+
+		// Test the character count to make sure it does not exceed maxOutgoingCharacters
+		const jsonString = JSON.stringify(input);
 		const characterCount = jsonString.length;
 
 		const maxCharacters = maxOutgoingCharacters
@@ -98,24 +97,25 @@ export default class OpenAiApi {
 		}
 
 		try {
-			const requestParams: Parameters<typeof openai.chat.completions.create>[0] = {
-				messages: messages,
+			const requestParams: Record<string, unknown> = {
 				model: model ?? this.plugin.settings.defaultModel,
-				max_completion_tokens: maxTokens ?? this.plugin.settings.defaultMaxNumTokens,
+				instructions: instructions,
+				input: input,
+				max_output_tokens: maxTokens ?? this.plugin.settings.defaultMaxNumTokens,
 			};
 
 			if (this.plugin.settings.enableWebSearch) {
-				// web_search_options enables real-time web results via search-capable models
-				// (gpt-4o-search-preview, gpt-4o-mini-search-preview, gpt-5-search-api)
-				(requestParams as Record<string, unknown>)["web_search_options"] = {};
+				// web_search tool works with any capable model on both OpenAI and x.ai
+				requestParams["tools"] = [{ type: "web_search" }];
 			}
 
-			const completion = await openai.chat.completions.create(requestParams);
+			const response = await (openai.responses.create as (params: Record<string, unknown>) => Promise<Record<string, unknown>>)(requestParams);
 
 			if (this.plugin.settings.debugToConsole) {
 				const logMessage = {
-					prompt: messages,
-					completion: completion,
+					instructions: instructions,
+					input: input,
+					response: response,
 					clientOptions: openai,
 					outgoingCharacterCountMax: maxCharacters,
 					outgoingCharacerCountActual: characterCount,
@@ -130,19 +130,18 @@ export default class OpenAiApi {
 				((Platform.isMobile && this.plugin.settings.displayTokenUsageMobile) ??
 					false)
 			) {
-				const { usage } = completion;
+				const usage = response["usage"] as Record<string, number> | undefined;
 				if (usage) {
 					const displayMessage =
 						`${this.plugin.APP_ABBREVIARTION}:\n` +
-						`Tokens: ${usage.prompt_tokens.toString()}/${usage.completion_tokens.toString()}/${usage.total_tokens.toString()}\n` +
+						`Tokens: ${usage["input_tokens"].toString()}/${usage["output_tokens"].toString()}/${usage["total_tokens"].toString()}\n` +
 						`Character count: ${characterCount.toString()}`;
 					new Notice(displayMessage, 8000);
 				}
 			}
 
-			return completion.choices[0].message.content
-				? completion.choices[0].message.content
-				: "";
+			const outputText = response["output_text"];
+			return typeof outputText === "string" ? outputText : "";
 		} catch (error) {
 			new Notice(
 				`${this.plugin.APP_ABBREVIARTION} Error: ${String(error)}`,
@@ -152,7 +151,7 @@ export default class OpenAiApi {
 		}
 	};
 
-	// for the current endpoint, returns a list of available modeels
+	// for the current endpoint, returns a list of available models
 	availableModels = async (): Promise<string[]> => {
 		const openai = new OpenAI({
 			apiKey: this.plugin.settings.defaultApiKey,
