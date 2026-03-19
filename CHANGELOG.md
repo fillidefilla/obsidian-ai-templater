@@ -1,3 +1,7 @@
+# 1.0.22
+### Updates
+- fix: extract output text from raw Responses API output array — resolves empty AI responses when using requestUrl instead of the OpenAI SDK
+
 # 1.0.18
 ### Updates
 - automated release
