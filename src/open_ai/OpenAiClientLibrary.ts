@@ -1,7 +1,11 @@
 // This module takes care of all communication with OpenAI-compatible APIs
 // using Obsidian's requestUrl to bypass CORS restrictions in the browser context.
-// Uses the Chat Completions API (/chat/completions) which is supported by all
-// providers: OpenAI, x.ai, OpenRouter, and other compatible services.
+//
+// API selection:
+//   Web search ON  → Responses API (/responses) with tools: [{type: "web_search"}]
+//                    Both OpenAI and x.ai support this identical format.
+//   Web search OFF → Chat Completions API (/chat/completions)
+//                    Universal fallback supported by all providers.
 
 import { Notice, Platform, requestUrl } from "obsidian";
 import type { ChatCompletionMessageParam } from "openai/resources";
@@ -47,7 +51,7 @@ export default class OpenAiApi {
 		return true;
 	};
 
-	// executes a single prompt and returns the completion via Chat Completions API
+	// executes a single prompt and returns the completion
 	chat = async (
 		promptOrMessages: string | ChatCompletionMessageParam[],
 		model?: string | null,
@@ -72,7 +76,7 @@ export default class OpenAiApi {
 				? [{ role: "user", content: promptOrMessages }]
 				: [...promptOrMessages];
 
-		// Ensure system message is present.
+		// Extract system message.
 		// Priority: systemMessage argument > system entry in array > settings default
 		let instructions: string = this.plugin.settings.defaultSystemMessage;
 		const systemIndex = messages.findIndex((m) => m.role === "system");
@@ -83,14 +87,11 @@ export default class OpenAiApi {
 		}
 		if (systemMessage) instructions = systemMessage;
 
-		// Build the full messages array with the system message at the front
-		const allMessages: ChatCompletionMessageParam[] = [
-			{ role: "system", content: instructions },
-			...messages,
-		];
+		// Only user/assistant messages (no system) remain
+		const input = messages;
 
 		// Test the character count to make sure it does not exceed maxOutgoingCharacters
-		const jsonString = JSON.stringify(allMessages);
+		const jsonString = JSON.stringify(input);
 		const characterCount = jsonString.length;
 
 		const maxCharacters = maxOutgoingCharacters
@@ -108,30 +109,47 @@ export default class OpenAiApi {
 		}
 
 		const base = this.baseUrl(baseURL);
-		const url = `${base}/chat/completions`;
+		const resolvedMaxTokens =
+			maxTokens ?? this.plugin.settings.defaultMaxNumTokens;
+
+		// When web search is enabled and the provider supports the Responses API,
+		// use it — both OpenAI and x.ai accept tools: [{type: "web_search"}].
+		// Otherwise fall back to the universal Chat Completions API.
+		const webSearchEnabled = this.plugin.settings.enableWebSearch ?? false;
+		const supportsResponsesApi =
+			base.includes("api.openai.com") || base.includes("x.ai");
+		const useResponsesApi = webSearchEnabled && supportsResponsesApi;
+
+		const url = useResponsesApi
+			? `${base}/responses`
+			: `${base}/chat/completions`;
 
 		try {
 			const resolvedApiKey = apiKey ?? this.plugin.settings.defaultApiKey;
 			const resolvedModel = model ?? this.plugin.settings.defaultModel;
 
-			const body: Record<string, unknown> = {
-				model: resolvedModel,
-				messages: allMessages,
-				max_tokens: maxTokens ?? this.plugin.settings.defaultMaxNumTokens,
-			};
+			let body: Record<string, unknown>;
 
-			// Web search: each provider has its own mechanism
-			if (this.plugin.settings.enableWebSearch) {
-				if (base.includes("api.openai.com")) {
-					// OpenAI: web_search_options (requires search-capable models
-					// like gpt-4o-search-preview or gpt-4o-mini-search-preview)
-					body["web_search_options"] = {};
-				} else if (base.includes("x.ai")) {
-					// x.ai / Grok: live search via search_parameters
-					body["search_parameters"] = { mode: "auto" };
-				}
-				// Other providers: web search not universally available,
-				// skip silently so the request still succeeds.
+			if (useResponsesApi) {
+				// ── Responses API (/responses) ───────────────────────
+				body = {
+					model: resolvedModel,
+					instructions: instructions,
+					input: input,
+					max_output_tokens: resolvedMaxTokens,
+					tools: [{ type: "web_search" }],
+				};
+			} else {
+				// ── Chat Completions API (/chat/completions) ─────────
+				const allMessages: ChatCompletionMessageParam[] = [
+					{ role: "system", content: instructions },
+					...input,
+				];
+				body = {
+					model: resolvedModel,
+					messages: allMessages,
+					max_tokens: resolvedMaxTokens,
+				};
 			}
 
 			const headers: Record<string, string> = {
@@ -159,8 +177,9 @@ export default class OpenAiApi {
 			if (this.plugin.settings.debugToConsole) {
 				this.plugin.log("chat", {
 					url,
+					api: useResponsesApi ? "responses" : "chat-completions",
 					instructions,
-					messages: allMessages,
+					input,
 					response: data,
 					outgoingCharacterCountMax: maxCharacters,
 					outgoingCharacerCountActual: characterCount,
@@ -178,8 +197,10 @@ export default class OpenAiApi {
 				// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
 				const usage = data?.usage as Record<string, number> | undefined;
 				if (usage) {
-					const inTok = usage["prompt_tokens"] ?? 0;
-					const outTok = usage["completion_tokens"] ?? 0;
+					// Responses API uses input_tokens/output_tokens,
+					// Chat Completions uses prompt_tokens/completion_tokens.
+					const inTok = usage["input_tokens"] ?? usage["prompt_tokens"] ?? 0;
+					const outTok = usage["output_tokens"] ?? usage["completion_tokens"] ?? 0;
 					const totalTok = usage["total_tokens"] ?? inTok + outTok;
 					const displayMessage =
 						`${this.plugin.APP_ABBREVIARTION}:\n` +
@@ -189,21 +210,46 @@ export default class OpenAiApi {
 				}
 			}
 
-			// ── Extract output text from choices[0].message.content ─
-			// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-			const choices = data?.choices as Array<Record<string, unknown>> | undefined;
+			// ── Extract output text ──────────────────────────────────
 			let outputText = "";
-			if (Array.isArray(choices) && choices.length > 0) {
-				const message = choices[0]["message"] as Record<string, unknown> | undefined;
-				if (message && typeof message["content"] === "string") {
-					outputText = message["content"] as string;
+
+			if (useResponsesApi) {
+				// Responses API: output_text is an SDK-only convenience
+				// property absent from raw JSON. Walk the output array.
+				// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+				if (typeof data?.output_text === "string") {
+					outputText = data.output_text as string;
+				} else if (Array.isArray(data?.output)) {
+					const parts: string[] = [];
+					// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+					for (const item of data.output as Array<Record<string, unknown>>) {
+						if (item["type"] === "message" && Array.isArray(item["content"])) {
+							for (const block of item["content"] as Array<Record<string, unknown>>) {
+								if (block["type"] === "output_text" && typeof block["text"] === "string") {
+									parts.push(block["text"] as string);
+								}
+							}
+						}
+					}
+					outputText = parts.join("");
+				}
+			} else {
+				// Chat Completions API: choices[0].message.content
+				// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+				const choices = data?.choices as Array<Record<string, unknown>> | undefined;
+				if (Array.isArray(choices) && choices.length > 0) {
+					const message = choices[0]["message"] as Record<string, unknown> | undefined;
+					if (message && typeof message["content"] === "string") {
+						outputText = message["content"] as string;
+					}
 				}
 			}
 
 			if (!outputText) {
 				console.warn(
 					`${this.plugin.APP_ABBREVIARTION}: chat() returned empty output. ` +
-					`Status: ${String(res.status)}. ` +
+					`API: ${useResponsesApi ? "Responses" : "ChatCompletions"}. ` +
+					`URL: ${url}. Status: ${String(res.status)}. ` +
 					// eslint-disable-next-line @typescript-eslint/no-unsafe-argument
 					`Response keys: ${data ? Object.keys(data).join(", ") : "null"}. ` +
 					`Raw response:`,
