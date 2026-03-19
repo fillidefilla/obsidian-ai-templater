@@ -1,6 +1,7 @@
 // This module takes care of all communication with the OpenAI-compatible API
 // using Obsidian's requestUrl to bypass CORS restrictions in the browser context.
-// https://platform.openai.com/docs/api-reference
+// Supports both the OpenAI Responses API and the Chat Completions API used by
+// x.ai, OpenRouter, and other OpenAI-compatible providers.
 
 import { Notice, Platform, requestUrl } from "obsidian";
 import type { ChatCompletionMessageParam } from "openai/resources";
@@ -25,6 +26,12 @@ export default class OpenAiApi {
 		return raw.replace(/\/+$/, "");
 	}
 
+	// The Responses API is only available on the OpenAI platform.
+	// All other providers (x.ai, OpenRouter, etc.) use Chat Completions.
+	private useResponsesApi(base: string): boolean {
+		return base.includes("api.openai.com");
+	}
+
 	// validates the current settings (API Key and Model)
 	validateSettings = (): boolean => {
 		if (!this.plugin.settings.defaultApiKey) {
@@ -38,7 +45,9 @@ export default class OpenAiApi {
 		return true;
 	};
 
-	// executes a single prompt and returns the completion via the Responses API
+	// executes a single prompt and returns the completion
+	// Automatically selects Responses API (OpenAI) or Chat Completions API
+	// (x.ai, OpenRouter, and other OpenAI-compatible providers).
 	chat = async (
 		promptOrMessages: string | ChatCompletionMessageParam[],
 		model?: string | null,
@@ -63,8 +72,7 @@ export default class OpenAiApi {
 				? [{ role: "user", content: promptOrMessages }]
 				: [...promptOrMessages];
 
-		// Extract system message from the array — Responses API requires it in
-		// the separate `instructions` field, not inside `input`.
+		// Extract system message
 		// Priority: systemMessage argument > system entry in array > settings default
 		let instructions: string = this.plugin.settings.defaultSystemMessage;
 		const systemIndex = messages.findIndex((m) => m.role === "system");
@@ -75,7 +83,7 @@ export default class OpenAiApi {
 		}
 		if (systemMessage) instructions = systemMessage;
 
-		// Only user/assistant messages go into `input`
+		// Only user/assistant messages (no system) remain
 		const input = messages;
 
 		// Test the character count to make sure it does not exceed maxOutgoingCharacters
@@ -99,25 +107,52 @@ export default class OpenAiApi {
 		try {
 			const resolvedApiKey = apiKey ?? this.plugin.settings.defaultApiKey;
 			const resolvedModel = model ?? this.plugin.settings.defaultModel;
-			const url = `${this.baseUrl(baseURL)}/responses`;
-
-			const body: Record<string, unknown> = {
-				model: resolvedModel,
-				instructions: instructions,
-				input: input,
-				max_output_tokens: maxTokens ?? this.plugin.settings.defaultMaxNumTokens,
-			};
-
-			if (this.plugin.settings.enableWebSearch) {
-				// web_search tool works with any capable model on both OpenAI and x.ai
-				body["tools"] = [{ type: "web_search" }];
-			}
+			const base = this.baseUrl(baseURL);
+			const resolvedMaxTokens =
+				maxTokens ?? this.plugin.settings.defaultMaxNumTokens;
 
 			const headers: Record<string, string> = {
 				"Content-Type": "application/json",
 				"Authorization": `Bearer ${resolvedApiKey}`,
 			};
 			if (organization) headers["OpenAI-Organization"] = organization;
+
+			let url: string;
+			let body: Record<string, unknown>;
+
+			if (this.useResponsesApi(base)) {
+				// ── OpenAI Responses API ──────────────────────────────
+				url = `${base}/responses`;
+				body = {
+					model: resolvedModel,
+					instructions: instructions,
+					input: input,
+					max_output_tokens: resolvedMaxTokens,
+				};
+				if (this.plugin.settings.enableWebSearch) {
+					body["tools"] = [{ type: "web_search" }];
+				}
+			} else {
+				// ── Chat Completions API (x.ai, OpenRouter, etc.) ────
+				url = `${base}/chat/completions`;
+				const allMessages: ChatCompletionMessageParam[] = [
+					{ role: "system", content: instructions },
+					...input,
+				];
+				body = {
+					model: resolvedModel,
+					messages: allMessages,
+					max_tokens: resolvedMaxTokens,
+				};
+				if (this.plugin.settings.enableWebSearch) {
+					if (base.includes("x.ai")) {
+						// x.ai / Grok: enable live search via search_parameters
+						body["search_parameters"] = { mode: "auto" };
+					}
+					// Other providers: web search not universally available,
+					// skip silently so the request still succeeds.
+				}
+			}
 
 			const res = await requestUrl({
 				url,
@@ -146,6 +181,7 @@ export default class OpenAiApi {
 				});
 			}
 
+			// ── Token usage display ──────────────────────────────────
 			if (
 				((Platform.isDesktop &&
 					this.plugin.settings.displayTokenUsageDesktop) ??
@@ -156,42 +192,61 @@ export default class OpenAiApi {
 				// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
 				const usage = data?.usage as Record<string, number> | undefined;
 				if (usage) {
+					// Responses API uses input_tokens/output_tokens,
+					// Chat Completions uses prompt_tokens/completion_tokens.
+					const inTok = usage["input_tokens"] ?? usage["prompt_tokens"] ?? 0;
+					const outTok = usage["output_tokens"] ?? usage["completion_tokens"] ?? 0;
+					const totalTok = usage["total_tokens"] ?? inTok + outTok;
 					const displayMessage =
 						`${this.plugin.APP_ABBREVIARTION}:\n` +
-						`Tokens: ${usage["input_tokens"].toString()}/${usage["output_tokens"].toString()}/${usage["total_tokens"].toString()}\n` +
+						`Tokens: ${inTok.toString()}/${outTok.toString()}/${totalTok.toString()}\n` +
 						`Character count: ${characterCount.toString()}`;
 					new Notice(displayMessage, 8000);
 				}
 			}
 
-			// output_text is an SDK-only convenience property; it is absent from the
-			// raw JSON returned by requestUrl. Fall back to walking the output array.
-			// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-			let outputText: string = typeof data?.output_text === "string" ? (data.output_text as string) : "";
-			if (!outputText && Array.isArray(data?.output)) {
-				const parts: string[] = [];
+			// ── Extract output text ──────────────────────────────────
+			let outputText = "";
+
+			if (this.useResponsesApi(base)) {
+				// Responses API: output_text is an SDK-only convenience
+				// property absent from raw JSON. Walk the output array.
 				// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-				for (const item of data.output as Array<Record<string, unknown>>) {
-					if (item["type"] === "message" && Array.isArray(item["content"])) {
-						for (const block of item["content"] as Array<Record<string, unknown>>) {
-							if (block["type"] === "output_text" && typeof block["text"] === "string") {
-								parts.push(block["text"]);
+				if (typeof data?.output_text === "string") {
+					outputText = data.output_text as string;
+				} else if (Array.isArray(data?.output)) {
+					const parts: string[] = [];
+					// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+					for (const item of data.output as Array<Record<string, unknown>>) {
+						if (item["type"] === "message" && Array.isArray(item["content"])) {
+							for (const block of item["content"] as Array<Record<string, unknown>>) {
+								if (block["type"] === "output_text" && typeof block["text"] === "string") {
+									parts.push(block["text"] as string);
+								}
 							}
 						}
 					}
+					outputText = parts.join("");
 				}
-				outputText = parts.join("");
+			} else {
+				// Chat Completions API: choices[0].message.content
+				// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+				const choices = data?.choices as Array<Record<string, unknown>> | undefined;
+				if (Array.isArray(choices) && choices.length > 0) {
+					const message = choices[0]["message"] as Record<string, unknown> | undefined;
+					if (message && typeof message["content"] === "string") {
+						outputText = message["content"] as string;
+					}
+				}
 			}
 
 			if (!outputText) {
-				// Always log the raw response when output extraction fails so users
-				// can diagnose issues without enabling full debug mode.
 				console.warn(
 					`${this.plugin.APP_ABBREVIARTION}: chat() returned empty output. ` +
+					`API: ${this.useResponsesApi(base) ? "Responses" : "ChatCompletions"}. ` +
 					`Status: ${String(res.status)}. ` +
 					// eslint-disable-next-line @typescript-eslint/no-unsafe-argument
 					`Response keys: ${data ? Object.keys(data).join(", ") : "null"}. ` +
-					`output field type: ${typeof (data as Record<string, unknown>)?.["output"]}. ` +
 					`Raw response:`,
 					data,
 				);
@@ -253,5 +308,3 @@ export default class OpenAiApi {
 		}
 	};
 }
-
-

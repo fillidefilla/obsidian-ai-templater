@@ -113,8 +113,9 @@ export class OWlSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Enable web search")
 			.setDesc(
-				"Gives the model access to real-time web results via the Responses API web_search tool. " +
-				"Works with any capable model from OpenAI (gpt-4o, gpt-4.1, o4-mini, …) or x.ai (grok-3, …).",
+				"Gives the model access to real-time web results. " +
+				"OpenAI: uses the Responses API web_search tool (gpt-4o, gpt-4.1, o4-mini, …). " +
+				"x.ai: uses live search via search_parameters (grok-3, …).",
 			)
 			.addToggle((cb: ToggleComponent) => {
 				cb.setValue(this.plugin.settings.enableWebSearch ?? true);
