@@ -16,14 +16,22 @@ export default class OpenAiApi {
 		this.plugin = plugin;
 	}
 
-	// returns the base URL to use, stripping any trailing slash
+	// returns the base URL to use, normalised so it always ends with /v…
+	// Handles common user inputs like "https://api.x.ai" or
+	// "https://api.x.ai/" by appending "/v1" when no version path is present.
 	private baseUrl(overrideBaseURL?: string | null): string {
 		const raw =
 			overrideBaseURL ??
 			(this.plugin.settings.defaultEndpoint !== ""
 				? this.plugin.settings.defaultEndpoint
 				: OPENAI_BASE);
-		return raw.replace(/\/+$/, "");
+		let base = raw.replace(/\/+$/, "");
+		// If the URL doesn't already end with a version path (e.g. /v1, /v2),
+		// append /v1 so that API routes like /chat/completions resolve correctly.
+		if (!/\/v\d+$/.test(base)) {
+			base += "/v1";
+		}
+		return base;
 	}
 
 	// validates the current settings (API Key and Model)
@@ -99,11 +107,12 @@ export default class OpenAiApi {
 			return "";
 		}
 
+		const base = this.baseUrl(baseURL);
+		const url = `${base}/chat/completions`;
+
 		try {
 			const resolvedApiKey = apiKey ?? this.plugin.settings.defaultApiKey;
 			const resolvedModel = model ?? this.plugin.settings.defaultModel;
-			const base = this.baseUrl(baseURL);
-			const url = `${base}/chat/completions`;
 
 			const body: Record<string, unknown> = {
 				model: resolvedModel,
@@ -204,7 +213,7 @@ export default class OpenAiApi {
 			return outputText;
 		} catch (error) {
 			console.error(
-				`${this.plugin.APP_ABBREVIARTION}: chat() caught error:`,
+				`${this.plugin.APP_ABBREVIARTION}: chat() request to ${url} failed:`,
 				error,
 			);
 			new Notice(

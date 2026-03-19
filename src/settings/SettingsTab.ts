@@ -18,8 +18,9 @@ export class OWlSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Endpoint")
 			.setDesc(
-				`The default endpoint for the AI service. Leave this field blank to use the default OpenAI endpoint. 
-         Otherwise provide an OpenAI API compatible endpoint. For example: https://openrouter.ai/api/v1/`,
+				`The default endpoint for the AI service. Leave blank for OpenAI. ` +
+				`For other providers, enter their base URL (e.g. https://api.x.ai/v1 or https://openrouter.ai/api/v1). ` +
+				`If you omit the /v1 suffix, it will be added automatically.`,
 			)
 			.setClass("ait-settings")
 			.addText((text) => {
