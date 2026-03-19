@@ -164,9 +164,25 @@ export default class OpenAiApi {
 				}
 			}
 
+			// output_text is an SDK-only convenience property; it is absent from the
+			// raw JSON returned by requestUrl. Fall back to walking the output array.
 			// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-			const outputText = data?.output_text;
-			return typeof outputText === "string" ? outputText : "";
+			let outputText: string = typeof data?.output_text === "string" ? (data.output_text as string) : "";
+			if (!outputText && Array.isArray(data?.output)) {
+				const parts: string[] = [];
+				// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+				for (const item of data.output as Array<Record<string, unknown>>) {
+					if (item["type"] === "message" && Array.isArray(item["content"])) {
+						for (const block of item["content"] as Array<Record<string, unknown>>) {
+							if (block["type"] === "output_text" && typeof block["text"] === "string") {
+								parts.push(block["text"]);
+							}
+						}
+					}
+				}
+				outputText = parts.join("");
+			}
+			return outputText;
 		} catch (error) {
 			new Notice(
 				`${this.plugin.APP_ABBREVIARTION} Error: ${String(error)}`,
