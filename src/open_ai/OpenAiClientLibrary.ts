@@ -2,10 +2,9 @@
 // using Obsidian's requestUrl to bypass CORS restrictions in the browser context.
 //
 // API selection:
-//   Web search ON  → Responses API (/responses) with tools: [{type: "web_search"}]
-//                    Both OpenAI and x.ai support this identical format.
-//   Web search OFF → Chat Completions API (/chat/completions)
-//                    Universal fallback supported by all providers.
+//   OpenAI & x.ai → Responses API (/responses)
+//                    + optional web_search tool when enabled in settings
+//   Other providers → Chat Completions API (/chat/completions)
 
 import { Notice, Platform, requestUrl } from "obsidian";
 import type { ChatCompletionMessageParam } from "openai/resources";
@@ -31,11 +30,17 @@ export default class OpenAiApi {
 				: OPENAI_BASE);
 		let base = raw.replace(/\/+$/, "");
 		// If the URL doesn't already end with a version path (e.g. /v1, /v2),
-		// append /v1 so that API routes like /chat/completions resolve correctly.
+		// append /v1 so that API routes resolve correctly.
 		if (!/\/v\d+$/.test(base)) {
 			base += "/v1";
 		}
 		return base;
+	}
+
+	// Both OpenAI and x.ai support the Responses API.
+	// Other providers (OpenRouter, etc.) only support Chat Completions.
+	private supportsResponsesApi(base: string): boolean {
+		return base.includes("api.openai.com") || base.includes("x.ai");
 	}
 
 	// validates the current settings (API Key and Model)
@@ -111,14 +116,7 @@ export default class OpenAiApi {
 		const base = this.baseUrl(baseURL);
 		const resolvedMaxTokens =
 			maxTokens ?? this.plugin.settings.defaultMaxNumTokens;
-
-		// When web search is enabled and the provider supports the Responses API,
-		// use it — both OpenAI and x.ai accept tools: [{type: "web_search"}].
-		// Otherwise fall back to the universal Chat Completions API.
-		const webSearchEnabled = this.plugin.settings.enableWebSearch ?? false;
-		const supportsResponsesApi =
-			base.includes("api.openai.com") || base.includes("x.ai");
-		const useResponsesApi = webSearchEnabled && supportsResponsesApi;
+		const useResponsesApi = this.supportsResponsesApi(base);
 
 		const url = useResponsesApi
 			? `${base}/responses`
@@ -137,10 +135,13 @@ export default class OpenAiApi {
 					instructions: instructions,
 					input: input,
 					max_output_tokens: resolvedMaxTokens,
-					tools: [{ type: "web_search" }],
 				};
+				if (this.plugin.settings.enableWebSearch) {
+					body["tools"] = [{ type: "web_search" }];
+				}
 			} else {
 				// ── Chat Completions API (/chat/completions) ─────────
+				// Fallback for providers that don't support Responses API
 				const allMessages: ChatCompletionMessageParam[] = [
 					{ role: "system", content: instructions },
 					...input,
