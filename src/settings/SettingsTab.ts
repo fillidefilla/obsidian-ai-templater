@@ -18,8 +18,8 @@ export class OWlSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Endpoint")
 			.setDesc(
-				`The default endpoint for the AI service. Leave this field blank to use the default OpenAI endpoint. 
-         Otherwise provide an OpenAI API compatible endpoint. For example: https://openrouter.ai/api/v1/`,
+				`The default endpoint for the AI service. Leave blank for OpenAI. ` +
+				`Examples: https://api.x.ai/v1, https://openrouter.ai/api/v1`,
 			)
 			.setClass("ait-settings")
 			.addText((text) => {
@@ -113,8 +113,8 @@ export class OWlSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Enable web search")
 			.setDesc(
-				"Gives the model access to real-time web results via the Responses API web_search tool. " +
-				"Works with any capable model from OpenAI (gpt-4o, gpt-4.1, o4-mini, …) or x.ai (grok-3, …).",
+				"Adds the web_search tool to requests, giving the model real-time web access. " +
+				"Works with OpenAI (gpt-4o, gpt-4.1, …) and x.ai (grok-3, grok-4, …).",
 			)
 			.addToggle((cb: ToggleComponent) => {
 				cb.setValue(this.plugin.settings.enableWebSearch ?? true);
