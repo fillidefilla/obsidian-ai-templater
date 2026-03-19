@@ -182,8 +182,26 @@ export default class OpenAiApi {
 				}
 				outputText = parts.join("");
 			}
+
+			if (!outputText) {
+				// Always log the raw response when output extraction fails so users
+				// can diagnose issues without enabling full debug mode.
+				console.warn(
+					`${this.plugin.APP_ABBREVIARTION}: chat() returned empty output. ` +
+					`Status: ${String(res.status)}. ` +
+					// eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+					`Response keys: ${data ? Object.keys(data).join(", ") : "null"}. ` +
+					`output field type: ${typeof (data as Record<string, unknown>)?.["output"]}. ` +
+					`Raw response:`,
+					data,
+				);
+			}
 			return outputText;
 		} catch (error) {
+			console.error(
+				`${this.plugin.APP_ABBREVIARTION}: chat() caught error:`,
+				error,
+			);
 			new Notice(
 				`${this.plugin.APP_ABBREVIARTION} Error: ${String(error)}`,
 				20000,
